@@ -1,0 +1,21 @@
+# PlatformIO
+.pio
+.vscode
+
+# CLion
+.idea
+cmake-build-debug
+cmake-build-release
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.elf
+*.bin
+*.hex
+*.uf2
+
+# Other
+.DS_Store
+Thumbs.db
