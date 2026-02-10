@@ -4,7 +4,9 @@
 #include <math.h>
 
 // --- Sozlamalar ---
-#define MQ6_ANALOG_PIN  34
+#define MQ6_ANALOG_PIN  341
+//fir  datchikni  d0  35 ga ulandi
+//
 #define FIRE_PIN        14
 #define I2C_SDA_PIN 23
 #define I2C_SCL_PIN 21
