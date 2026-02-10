@@ -3,273 +3,261 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <esp_task_wdt.h> // Tizim "soqchisi"
 
-// --- ULTIMATE GOLD IOT SYSTEM ---
-// "Peak Performance" Architecture
-// --------------------------------
+// --- GOLD STANDARD CONFIGURATION ---
 
-// 1. DATCHIK PINLARI
-#define PIN_MQ6_AO   34  // LPG Analog
-#define PIN_MQ6_DO   25  // LPG Digital (Alarm)
-#define PIN_MQ9_AO   33  // Gaz Analog
-#define PIN_MQ9_DO   14  // Gaz Digital (Alarm)
-#define PIN_MQ7_AO   32  // CO Analog
-#define PIN_MQ7_DO   27  // CO Digital (Alarm)
-#define PIN_FIRE_DO  35  // Yong'in
+// 1. WIFI & SERVER (O'zingiznikiga o'zgartiring)
+const char* WIFI_SSID = "WiFi_Nomi";
+const char* WIFI_PASS = "WiFi_Paroli";
+const char* SERVER_URL = "http://example.com/api/data";
 
-// 2. SERVER VA WIFI SOZLAMALARI (O'zingiznikiga o'zgartiring)
-const char* WIFI_SSID = "WiFi_Nomi";      // <-- O'ZGARTIRING
-const char* WIFI_PASS = "WiFi_Paroli";    // <-- O'ZGARTIRING
-const char* SERVER_URL = "http://example.com/api/data"; // <-- O'ZGARTIRING
+// 2. PIN CONFIGURATION (ESP32 ADC1 faqat WiFi bilan ishlaydi!)
+// Analog Pinlar (Faqat 32, 33, 34, 35, 36, 39 ruxsat etiladi)
+#define PIN_MQ6_AO   34  // LPG (Propan/Butan)
+#define PIN_MQ9_AO   33  // Yonuvchi Gazlar
+#define PIN_MQ7_AO   32  // CO (Is gazi)
+#define PIN_FIRE_DO  35  // Olov Sensori (Analog/Digital sifatida ishlatish mumkin)
 
-// 3. HARDWARE CONSTANTS
-#define GAZ_ALARM_VOLT 2.5
-// Chegara: Agar toza havodan shahancha V ga oshsa signal beradi
-#define SENSITIVITY 0.8
+// Digital Alarm Pinlar (Ixtiyoriy GPIO)
+#define PIN_MQ6_DO   26
+#define PIN_MQ9_DO   14
+#define PIN_MQ7_DO   27
 
+// 3. I2C PINLARI (Ikki alohida liniya)
+#define I2C_LCD_SDA  21
+#define I2C_LCD_SCL  22
+#define I2C_MPU_SDA  19
+#define I2C_MPU_SCL  18
+
+// 4. SOZLAMALAR
+#define WDT_TIMEOUT  15  // 15 soniya (Xavfsizroq)
+#define SENS_THRESH  0.5 // Sezgirlik (Kalibratsiyadan keyingi +V kuchlanish)
+
+// --- OBYEKTLAR ---
+// LCD 0x27 yoki 0x3F manzilida bo'ladi
 LiquidCrystal_I2C lcd(0x27, 16, 4);
-TwoWire I2C_MPU = TwoWire(1);
+TwoWire I2C_MPU = TwoWire(1); // Ikkinchi I2C port
 
-// 4. GLOBAL STATE
-unsigned long lastNetworkCheck = 0;
-unsigned long lastDataSent = 0;
-unsigned long timerLCD = 0;
-bool mpuInitialized = false;
+// --- GLOBAL O'ZGARUVCHILAR ---
+float baseMq6 = 0, baseMq9 = 0, baseMq7 = 0;
 float lastX, lastY, lastZ;
+bool mpuActive = false;
+unsigned long lastSentTime = 0;
+unsigned long lastLcdTime = 0;
 
-// Kalibratsiya uchun o'zgaruvchilar
-float baseMQ6 = 0.0;
-float baseMQ9 = 0.0;
-float baseMQ7 = 0.0;
+// --- DATCHIKNI QAYTA ISHLASH (10 ta namuna o'rtachasi) ---
+float readAdcVoltage(int pin) {
+  uint32_t total = 0;
+  for (int i = 0; i < 15; i++) {
+    total += analogRead(pin);
+    delayMicroseconds(50);
+  }
+  // 12-bit ADC (0-4095) -> 3.3V convert
+  return (float)(total / 15.0f) * (3.3f / 4095.0f);
+}
 
-// --- YORDAMCHI: WIFI ULANISH (NON-BLOCKING) ---
-void checkNetwork() {
-  // Har 10 sekundda tarmoq holatini tekshiramiz
-  if (millis() - lastNetworkCheck > 10000) {
-    lastNetworkCheck = millis();
-    if (WiFi.status() != WL_CONNECTED) {
-      WiFi.disconnect();
-      WiFi.begin(WIFI_SSID, WIFI_PASS);
-      // Eslatma: Bu yerda while() bilan kutmaymiz, tizim qotib qolmasligi kerak
-    }
+// --- MPU6050 (ZILZILA) INIT ---
+void initMPU() {
+  I2C_MPU.begin(I2C_MPU_SDA, I2C_MPU_SCL, 100000); // 100kHz (Barqarorroq)
+  I2C_MPU.setTimeOut(2000); // 2 soniya timeout
+  delay(100);
+  I2C_MPU.beginTransmission(0x68);
+  I2C_MPU.write(0x6B); // Power Management
+  I2C_MPU.write(0);    // Wake up
+  if (I2C_MPU.endTransmission(true) == 0) {
+    mpuActive = true;
+    Serial.println("MPU6050: OK");
+  } else {
+    Serial.println("MPU6050: ERROR");
   }
 }
 
-// --- YORDAMCHI: MA'LUMOT YUBORISH (HTTP POST) ---
-void sendDataToServer(bool isAlarm, bool fire, bool gas, bool quake, float vMQ6, float vMQ7, float temp) {
+// --- HARORATNI O'QISH ---
+float getTemp() {
+  if (!mpuActive) return 0.0f;
+  I2C_MPU.beginTransmission(0x68);
+  I2C_MPU.write(0x41);
+  I2C_MPU.endTransmission(false);
+  I2C_MPU.requestFrom((uint8_t)0x68, (size_t)2, true);
+  if(I2C_MPU.available() == 2) {
+    int16_t t = (int16_t)(I2C_MPU.read() << 8 | I2C_MPU.read());
+    return (float)(t / 340.0f) + 36.53f;
+  }
+  return 0.0f;
+}
+
+// --- ZILZILA LOGIKASI ---
+bool checkQuake() {
+  if (!mpuActive) return false;
+  I2C_MPU.beginTransmission(0x68);
+  I2C_MPU.write(0x3B); // Accel X High
+  I2C_MPU.endTransmission(false);
+  I2C_MPU.requestFrom((uint8_t)0x68, (size_t)6, true);
+
+  if (I2C_MPU.available() < 6) return false;
+
+  int16_t x = (int16_t)(I2C_MPU.read() << 8 | I2C_MPU.read());
+  int16_t y = (int16_t)(I2C_MPU.read() << 8 | I2C_MPU.read());
+  int16_t z = (int16_t)(I2C_MPU.read() << 8 | I2C_MPU.read());
+
+  // O'lchov birligi (G-forcega yaqin nisbat)
+  float ax = (float)x / 16384.0f;
+  float ay = (float)y / 16384.0f;
+  float az = (float)z / 16384.0f;
+
+  float delta = abs(ax - lastX) + abs(ay - lastY) + abs(az - lastZ);
+  lastX = ax; lastY = ay; lastZ = az;
+
+  // 0.6 dan yuqori silkinish zilzila hisoblanadi
+  return (delta > 0.6f);
+}
+
+// --- SERVERGA YUBORISH ---
+void sendData(bool alarm, bool fire, bool quake, float v6, float v9, float v7, float temp) {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
     http.begin(SERVER_URL);
     http.addHeader("Content-Type", "application/json");
+    http.setTimeout(2000); // 2 soniya timeout
 
-    // JSON QURISH (Tezkor va yengil usul)
-    // Format: {"id":"ESP_HOME","alarm":true,"fire":false,"gas":true,"lpg":1.2,"co":0.5, "temp": 25.5}
-    char jsonBuffer[150];
-    snprintf(jsonBuffer, sizeof(jsonBuffer),
-             "{\"id\":\"ESP_HOME\",\"alarm\":%s,\"fire\":%s,\"gas\":%s,\"quake\":%s,\"lpg\":%.2f,\"co\":%.2f,\"temp\":%.1f}",
-             isAlarm ? "true" : "false",
-             fire ? "true" : "false",
-             gas ? "true" : "false",
-             quake ? "true" : "false",
-             vMQ6, vMQ7, temp);
+    char json[200];
+    snprintf(json, sizeof(json),
+      "{\"alarm\":%s,\"fire\":%s,\"quake\":%s,\"lpg\":%.2f,\"gas\":%.2f,\"co\":%.2f,\"temp\":%.1f}",
+      alarm ? "true":"false", fire ? "true":"false", quake ? "true":"false",
+      v6, v9, v7, temp
+    );
 
-    // Yuborish (Async emas, lekin qisqa vaqt oladi)
-    int httpResponseCode = http.POST(jsonBuffer);
+    int code = http.POST(json);
+    if(code > 0) Serial.printf("Server Javobi: %d\n", code);
+    else Serial.printf("Server Xatosi: %s\n", http.errorToString(code).c_str());
+
     http.end();
   }
 }
 
-// --- SIGNALNI FILTRLASH ---
-float readStableVoltage(int pin) {
-  long sum = 0;
-  for(int i=0; i<10; i++) { // Aniqroq bo'lishi uchun 5 dan 10 ga oshirdik
-    sum += analogRead(pin);
-    delay(2);
-  }
-  return (sum / 10.0) * (3.3 / 4095.0);
-}
-
-// --- KALIBRATSIYA FUNKSIYASI ---
-void calibrateSensors() {
-  lcd.clear();
-  lcd.print("Kalibratsiya...");
-  lcd.setCursor(0,1); lcd.print("Kuting: 10s");
-
-  float s6 = 0, s9 = 0, s7 = 0;
-  int count = 50;
-
-  for(int i=0; i<count; i++) {
-    s6 += analogRead(PIN_MQ6_AO);
-    s9 += analogRead(PIN_MQ9_AO);
-    s7 += analogRead(PIN_MQ7_AO);
-    delay(200); // 50 * 200ms = 10 soniya
-
-    // Progress bar
-    if(i % 5 == 0) {
-       lcd.setCursor(i/5, 2);
-       lcd.print(".");
-    }
-  }
-
-  // O'rtacha kuchlanishni (Bazaviy nol nuqta) hisoblash
-  baseMQ6 = (s6 / count) * (3.3 / 4095.0);
-  baseMQ9 = (s9 / count) * (3.3 / 4095.0);
-  baseMQ7 = (s7 / count) * (3.3 / 4095.0);
-
-  lcd.clear();
-  lcd.print("Kalibrlandi!");
-  delay(1000);
-}
-
-// --- MPU SETUP ---
-void initMPU() {
-  I2C_MPU.begin(19, 18, 400000);
-  I2C_MPU.beginTransmission(0x68);
-  I2C_MPU.write(0x6B); I2C_MPU.write(0);
-  if (I2C_MPU.endTransmission(true) == 0) mpuInitialized = true;
-}
-
-// --- MPU HARORATINI O'QISH ---
-float getMPUTemperature() {
-  if (!mpuInitialized) return 0.0;
-  I2C_MPU.beginTransmission(0x68);
-  I2C_MPU.write(0x41); // TEMP_OUT_H
-  I2C_MPU.endTransmission(false);
-  I2C_MPU.requestFrom(0x68, 2, true);
-
-  if (I2C_MPU.available() >= 2) {
-    int16_t rawh = I2C_MPU.read() << 8 | I2C_MPU.read();
-    return (rawh / 340.0) + 36.53; // MPU6050 formulasi
-  }
-  return 0.0;
-}
-
-// --- ZILZILA LOGIKASI ---
-bool checkEarthquake() {
-  if (!mpuInitialized) return false;
-  I2C_MPU.beginTransmission(0x68);
-  I2C_MPU.write(0x3B);
-  I2C_MPU.endTransmission(false);
-  I2C_MPU.requestFrom(0x68, 6, true);
-  if (I2C_MPU.available() < 6) return false;
-
-  int16_t x = I2C_MPU.read()<<8|I2C_MPU.read();
-  int16_t y = I2C_MPU.read()<<8|I2C_MPU.read();
-  int16_t z = I2C_MPU.read()<<8|I2C_MPU.read();
-
-  float ax=x/16384.0; float ay=y/16384.0; float az=z/16384.0;
-  float delta = abs(ax-lastX) + abs(ay-lastY) + abs(az-lastZ);
-  lastX=ax; lastY=ay; lastZ=az;
-
-  return (delta > 0.5 && delta < 10.0);
-}
-
+// --- SETUP ---
 void setup() {
   Serial.begin(115200);
+  delay(1000); // Serial port ochilishi uchun kutish
+  Serial.println("\n\n=========================================");
+  Serial.println("=== GOLD STANDARD SYSTEM INITIALIZING ===");
+  Serial.println("=========================================");
 
-  // Pinlar
-  pinMode(PIN_FIRE_DO, INPUT);
+  // Watchdog Timer yoqilishi (Safety)
+  esp_task_wdt_init(WDT_TIMEOUT, true);
+  esp_task_wdt_add(nullptr);
+
   pinMode(PIN_MQ6_DO, INPUT);
   pinMode(PIN_MQ9_DO, INPUT);
   pinMode(PIN_MQ7_DO, INPUT);
+  pinMode(PIN_FIRE_DO, INPUT); // Digital o'qish uchun
 
-  // LCD
-  Wire.begin(21, 22);
-  lcd.begin();
+  // I2C boshlash
+  Wire.begin(I2C_LCD_SDA, I2C_LCD_SCL); // LCD
+  Wire.setTimeOut(2000); // LCD I2C Timeout
+  lcd.init();
   lcd.backlight();
   lcd.print("SYSTEM STARTING");
+  Serial.println("[INIT] LCD Yuklandi");
 
-  // MPU
-  initMPU();
-  checkEarthquake();
+  initMPU(); // MPU
+  Serial.println("[INIT] MPU6050 Yuklandi");
 
-  // --- KALIBRATSIYA QILISH ---
-  // Tizim yonishi bilan hozirgi havoni "toza" deb oladi
-  calibrateSensors();
-
-  // WiFi Boshlash
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  lcd.setCursor(0,1); lcd.print("Wi-Fi Connecting");
-
-  // Bir muddat kutamiz, lekin majburiy emas
-  unsigned long startWait = millis();
-  while(WiFi.status() != WL_CONNECTED && millis() - startWait < 3000) {
+  // Kalibratsiya
+  Serial.println("[INIT] Sensorlar kalibratsiyasi boshlandi...");
+  lcd.setCursor(0,1); lcd.print("Kalibratsiya...");
+  for(int i=0; i<30; i++) { // 3 soniya (30 * 100ms)
+    baseMq6 += readAdcVoltage(PIN_MQ6_AO);
+    baseMq9 += readAdcVoltage(PIN_MQ9_AO);
+    baseMq7 += readAdcVoltage(PIN_MQ7_AO);
+    checkQuake(); // Dastlabki silkinishlarni ignor qilish
     delay(100);
+    esp_task_wdt_reset(); // Watchdogga "tirikmiz" deyish
+  }
+  baseMq6 /= 30.0;
+  baseMq9 /= 30.0;
+  baseMq7 /= 30.0;
+  Serial.printf("[INFO] Base V: MQ6=%.2f, MQ9=%.2f, MQ7=%.2f\n", baseMq6, baseMq9, baseMq7);
+
+  // WiFi
+  lcd.clear();
+  lcd.print("WiFi Ulanmoqda..");
+  Serial.println("[INIT] WiFi Ulanmoqda...");
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  // WiFi ni qotib qolmasdan kutish (max 3 sek)
+  long startW = millis();
+  while(WiFi.status() != WL_CONNECTED && millis() - startW < 5000) { // 5 sek kutish
+    delay(100);
+    esp_task_wdt_reset();
+    Serial.print(".");
+  }
+  Serial.println();
+  if(WiFi.status() == WL_CONNECTED) {
+      Serial.println("[SUCCESS] WiFi Ulandi! IP: " + WiFi.localIP().toString());
+  } else {
+      Serial.println("[WARNING] WiFi Ulanmadi (Offline rejim)");
   }
   lcd.clear();
 }
 
+// --- LOOP ---
 void loop() {
-  // 1. TARMOQNI FONDA BOSHQARISH
-  checkNetwork();
+  esp_task_wdt_reset(); // Tizim tirik, reset berma!
 
-  // 2. DATCHIKLARNI O'QISH
-  bool fire = (digitalRead(PIN_FIRE_DO) == LOW);
-  float vMQ6 = readStableVoltage(PIN_MQ6_AO);
-  float vMQ9 = readStableVoltage(PIN_MQ9_AO);
-  float vMQ7 = readStableVoltage(PIN_MQ7_AO);
-
-  // ALARM MANTIQI:
-  // 1. Digital Pin (Datchikni o'zini sozlagichi) signal bersa
-  // 2. YOKI: Hozirgi kuchlanish > (Bazaviy kuchlanish + Sezgirlik) bo'lsa
-  bool alarmGas = (digitalRead(PIN_MQ6_DO)==LOW || vMQ6 > (baseMQ6 + SENSITIVITY) ||
-                   digitalRead(PIN_MQ9_DO)==LOW || vMQ9 > (baseMQ9 + SENSITIVITY) ||
-                   digitalRead(PIN_MQ7_DO)==LOW || vMQ7 > (baseMQ7 + SENSITIVITY));
-
-  bool earthquake = checkEarthquake();
-
-  // 3. XAVFSIZLIK LOGIKASI (ALARM)
-  if (fire || alarmGas || earthquake) {
-     // Ekranni darhol yangilash
-     if (millis() - timerLCD > 200) {
-        lcd.clear();
-        lcd.setCursor(0,0);
-        if(fire) lcd.print("!!! YONG'IN !!!");
-        else if(earthquake) lcd.print("!!! ZILZILA !!!");
-        else lcd.print("!!! GAZ XAVFI !!!");
-
-        lcd.setCursor(0,1); lcd.print("SERVERGA YUBORILDI");
-        timerLCD = millis();
-     }
-
-     // Serverga signal yuborish (Xavf paytida har 3 sekundda)
-     if (millis() - lastDataSent > 3000) {
-       sendDataToServer(true, fire, alarmGas, earthquake, vMQ6, vMQ7, getMPUTemperature());
-       lastDataSent = millis();
-     }
-     return;
+  // 1. Tarmoqni tekshirish (uzilsa qayta ulaydi)
+  if (WiFi.status() != WL_CONNECTED && millis() % 10000 < 50) {
+     WiFi.disconnect();
+     WiFi.reconnect();
   }
 
-  // 4. TINCH HOLAT (MONITORING)
-  if (millis() - timerLCD > 500) {
-    timerLCD = millis();
-    lcd.setCursor(0,0); lcd.printf("LPG:%.1fV CO:%.1fV", vMQ6, vMQ7);
+  // 2. O'qish
+  float v6 = readAdcVoltage(PIN_MQ6_AO);
+  float v9 = readAdcVoltage(PIN_MQ9_AO);
+  float v7 = readAdcVoltage(PIN_MQ7_AO);
+  float temp = getTemp();
+  bool fire = digitalRead(PIN_FIRE_DO) == LOW;
 
-    // Haroratni va WiFi ni chiqarish
-    float temp = getMPUTemperature();
+  // 3. Xavf logikasi
+  // Digital sensordan 'LOW' kelsa yoki kuchlanish oshsa
+  bool gasDanger = (digitalRead(PIN_MQ6_DO)==LOW || v6 > baseMq6 + SENS_THRESH ||
+                    digitalRead(PIN_MQ9_DO)==LOW || v9 > baseMq9 + SENS_THRESH ||
+                    digitalRead(PIN_MQ7_DO)==LOW || v7 > baseMq7 + SENS_THRESH);
 
-    lcd.setCursor(0,1);
-    lcd.printf("Temp:%.1fC ", temp);
-    if(WiFi.status() == WL_CONNECTED) lcd.print("Wi:ON ");
-    else lcd.print("Wi:OFF");
+  bool quake = checkQuake();
+  bool alarm = fire || gasDanger || quake;
 
-    // --- SERIAL MONITORGA CHIQARISH (DEBUG) ---
-    Serial.println("--- SENSORLAR HOLATI ---");
-    // Kalibratsiyaga nisbatan farqni ko'rsatamiz
-    Serial.printf("LPG (MQ6): %.2f V (Base: %.2f)\n", vMQ6, baseMQ6);
-    Serial.printf("Gaz (MQ9): %.2f V (Base: %.2f)\n", vMQ9, baseMQ9);
-    Serial.printf("CO  (MQ7): %.2f V (Base: %.2f)\n", vMQ7, baseMQ7);
-    Serial.printf("Temp: %.1f C\n", temp);
-    Serial.printf("Yong'in: %s\n", fire ? "HA" : "YO'Q");
-    Serial.printf("Zilzila: %s\n", earthquake ? "HA" : "YO'Q");
-    Serial.printf("WiFi: %s\n", WiFi.status() == WL_CONNECTED ? "ULANGAN" : "UZILGAN");
-    Serial.println("--------------------------");
+  // 4. Ekran (Har 250ms yangilanadi yoki Xavf paytida darhol)
+  if (millis() - lastLcdTime > 250) {
+    lastLcdTime = millis();
+    lcd.setCursor(0,0);
+    if (alarm) {
+      if(fire)      lcd.print("!! YONG'IN !!   ");
+      else if(quake)lcd.print("!! ZILZILA !!   ");
+      else          lcd.print("!! GAZ XAVFI !! ");
 
-    // Serverga har 30 sekundda hisobot
-    if (millis() - lastDataSent > 30000) {
-       sendDataToServer(false, false, false, false, vMQ6, vMQ7, temp);
-       lastDataSent = millis();
+      lcd.setCursor(0,1); lcd.print("XAVF ANIQLANDI! ");
+    } else {
+      // Normal holat
+      lcd.printf("L:%.1f G:%.1f C:%.1f", v6, v9, v7);
+      lcd.setCursor(0,1);
+      lcd.printf("T:%.0fC W:%s", temp, WiFi.status()==WL_CONNECTED?"Ok":"..");
     }
   }
+
+  // 5. Serverga yuborish
+  // Xavf paytida har 3 soniyada, tinch paytda har 60 soniyada
+  unsigned long interval = alarm ? 3000 : 60000;
+  if (millis() - lastSentTime > interval) {
+    sendData(alarm, fire, quake, v6, v9, v7, temp);
+    lastSentTime = millis();
+
+    // Debug
+    Serial.printf("ST: G(%.2f) F(%d) Q(%d) W(%d)\n", v6, fire, quake, WiFi.status());
+  }
+
+  delay(10); // CPU yuklamasini kamaytirish
 }
