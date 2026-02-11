@@ -3,14 +3,15 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h> // HTTPS uchun
 #include <esp_task_wdt.h> // Tizim "soqchisi"
 
 // --- GOLD STANDARD CONFIGURATION ---
 
 // 1. WIFI & SERVER (O'zingiznikiga o'zgartiring)
-const char* WIFI_SSID = "WiFi_Nomi";
-const char* WIFI_PASS = "WiFi_Paroli";
-const char* SERVER_URL = "http://example.com/api/data";
+const char* WIFI_SSID = "Isobek's iPhone";
+const char* WIFI_PASS = "12345678";
+const char* SERVER_URL = "https://mchs.unusual.uz/api/sensor-data";
 
 // 2. PIN CONFIGURATION (ESP32 ADC1 faqat WiFi bilan ishlaydi!)
 // Analog Pinlar (Faqat 32, 33, 34, 35, 36, 39 ruxsat etiladi)
@@ -116,10 +117,19 @@ bool checkQuake() {
 // --- SERVERGA YUBORISH ---
 void sendData(bool alarm, bool fire, bool quake, float v6, float v9, float v7, float temp) {
   if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure client;
+    client.setInsecure(); // Hozircha sertifikatni tekshirmaymiz (oson ulanish uchun)
+
     HTTPClient http;
-    http.begin(SERVER_URL);
+    // HTTPS va HTTP farqini avtomatik aniqlash
+    if (String(SERVER_URL).startsWith("https")) {
+      http.begin(client, SERVER_URL);
+    } else {
+      http.begin(SERVER_URL);
+    }
+
     http.addHeader("Content-Type", "application/json");
-    http.setTimeout(2000); // 2 soniya timeout
+    http.setTimeout(5000); // Timeoutni oshiramiz (HTTPS sekinroq bo'lishi mumkin)
 
     char json[200];
     snprintf(json, sizeof(json),

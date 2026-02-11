@@ -73,7 +73,7 @@ app.post('/api/data', (req, res) => {
 `src/main.cpp` faylida serveringiz manzilini kiritishni unutmang:
 
 ```cpp
-const char* SERVER_URL = "http://sizning-serveringiz.com/api/data"; // <-- O'zgartiring!
+const char* SERVER_URL = "https://mchs.unusual.uz/api/sensor-data"; // <-- O'zgartiring!
 ```
 
 ---
