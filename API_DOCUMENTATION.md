@@ -12,7 +12,6 @@ Qurilma har doim quyidagi formatda ma'lumot yuboradi:
   "fire": false,
   "quake": false,
   "lpg": 0.45,
-  "gas": 0.32,
   "co": 0.12,
   "temp": 24.5
 }
@@ -26,7 +25,6 @@ Qurilma har doim quyidagi formatda ma'lumot yuboradi:
 | `fire` | `boolean` | Yong'in sensori (`true` = Olov aniqlandi) |
 | `quake` | `boolean` | Zilzila/Silkinish (`true` = 0.6G dan yuqori silkinish) |
 | `lpg` | `float` | MQ-6 (Propan/Butan) datchigi kuchlanishi (0.00v - 3.30v) |
-| `gas` | `float` | MQ-9 (Yonuvchi gazlar) datchigi kuchlanishi (0.00v - 3.30v) |
 | `co` | `float` | MQ-7 (Is gazi) datchigi kuchlanishi (0.00v - 3.30v) |
 | `temp` | `float` | MPU6050 ichidagi harorat sensori (°C) |
 

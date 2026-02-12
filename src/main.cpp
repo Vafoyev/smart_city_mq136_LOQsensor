@@ -9,20 +9,18 @@
 // --- GOLD STANDARD CONFIGURATION ---
 
 // 1. WIFI & SERVER (O'zingiznikiga o'zgartiring)
-const char* WIFI_SSID = "Isobek's iPhone";
-const char* WIFI_PASS = "12345678";
+const char* WIFI_SSID = "isobek";
+const char* WIFI_PASS = "isobek123";
 const char* SERVER_URL = "https://mchs.unusual.uz/api/sensor-data";
 
 // 2. PIN CONFIGURATION (ESP32 ADC1 faqat WiFi bilan ishlaydi!)
 // Analog Pinlar (Faqat 32, 33, 34, 35, 36, 39 ruxsat etiladi)
 #define PIN_MQ6_AO   34  // LPG (Propan/Butan)
-#define PIN_MQ9_AO   33  // Yonuvchi Gazlar
 #define PIN_MQ7_AO   32  // CO (Is gazi)
-#define PIN_FIRE_DO  35  // Olov Sensori (Analog/Digital sifatida ishlatish mumkin)
+#define PIN_FIRE_DO  14  // Olov Sensori (35 dan 14 ga o'zgartirildi - ishonchliroq)
 
 // Digital Alarm Pinlar (Ixtiyoriy GPIO)
 #define PIN_MQ6_DO   26
-#define PIN_MQ9_DO   14
 #define PIN_MQ7_DO   27
 
 // 3. I2C PINLARI (Ikki alohida liniya)
@@ -41,7 +39,7 @@ LiquidCrystal_I2C lcd(0x27, 16, 4);
 TwoWire I2C_MPU = TwoWire(1); // Ikkinchi I2C port
 
 // --- GLOBAL O'ZGARUVCHILAR ---
-float baseMq6 = 0, baseMq9 = 0, baseMq7 = 0;
+float baseMq6 = 0, baseMq7 = 0;
 float lastX, lastY, lastZ;
 bool mpuActive = false;
 unsigned long lastSentTime = 0;
@@ -115,7 +113,7 @@ bool checkQuake() {
 }
 
 // --- SERVERGA YUBORISH ---
-void sendData(bool alarm, bool fire, bool quake, float v6, float v9, float v7, float temp) {
+void sendData(bool alarm, bool fire, bool quake, float v6, float v7, float temp) {
   if (WiFi.status() == WL_CONNECTED) {
     WiFiClientSecure client;
     client.setInsecure(); // Hozircha sertifikatni tekshirmaymiz (oson ulanish uchun)
@@ -133,9 +131,9 @@ void sendData(bool alarm, bool fire, bool quake, float v6, float v9, float v7, f
 
     char json[200];
     snprintf(json, sizeof(json),
-      "{\"alarm\":%s,\"fire\":%s,\"quake\":%s,\"lpg\":%.2f,\"gas\":%.2f,\"co\":%.2f,\"temp\":%.1f}",
+      "{\"alarm\":%s,\"fire\":%s,\"quake\":%s,\"lpg\":%.2f,\"co\":%.2f,\"temp\":%.1f}",
       alarm ? "true":"false", fire ? "true":"false", quake ? "true":"false",
-      v6, v9, v7, temp
+      v6, v7, temp
     );
 
     int code = http.POST(json);
@@ -159,9 +157,8 @@ void setup() {
   esp_task_wdt_add(nullptr);
 
   pinMode(PIN_MQ6_DO, INPUT);
-  pinMode(PIN_MQ9_DO, INPUT);
   pinMode(PIN_MQ7_DO, INPUT);
-  pinMode(PIN_FIRE_DO, INPUT); // Digital o'qish uchun
+  pinMode(PIN_FIRE_DO, INPUT_PULLUP); // Ruxsat etilgan (ichki pull-up bor)
 
   // I2C boshlash
   Wire.begin(I2C_LCD_SDA, I2C_LCD_SCL); // LCD
@@ -179,16 +176,14 @@ void setup() {
   lcd.setCursor(0,1); lcd.print("Kalibratsiya...");
   for(int i=0; i<30; i++) { // 3 soniya (30 * 100ms)
     baseMq6 += readAdcVoltage(PIN_MQ6_AO);
-    baseMq9 += readAdcVoltage(PIN_MQ9_AO);
     baseMq7 += readAdcVoltage(PIN_MQ7_AO);
     checkQuake(); // Dastlabki silkinishlarni ignor qilish
     delay(100);
     esp_task_wdt_reset(); // Watchdogga "tirikmiz" deyish
   }
   baseMq6 /= 30.0;
-  baseMq9 /= 30.0;
   baseMq7 /= 30.0;
-  Serial.printf("[INFO] Base V: MQ6=%.2f, MQ9=%.2f, MQ7=%.2f\n", baseMq6, baseMq9, baseMq7);
+  Serial.printf("[INFO] Base V: MQ6=%.2f, MQ7=%.2f\n", baseMq6, baseMq7);
 
   // WiFi
   lcd.clear();
@@ -226,7 +221,6 @@ void loop() {
 
   // 2. O'qish
   float v6 = readAdcVoltage(PIN_MQ6_AO);
-  float v9 = readAdcVoltage(PIN_MQ9_AO);
   float v7 = readAdcVoltage(PIN_MQ7_AO);
   float temp = getTemp();
   bool fire = digitalRead(PIN_FIRE_DO) == LOW;
@@ -234,7 +228,6 @@ void loop() {
   // 3. Xavf logikasi
   // Digital sensordan 'LOW' kelsa yoki kuchlanish oshsa
   bool gasDanger = (digitalRead(PIN_MQ6_DO)==LOW || v6 > baseMq6 + SENS_THRESH ||
-                    digitalRead(PIN_MQ9_DO)==LOW || v9 > baseMq9 + SENS_THRESH ||
                     digitalRead(PIN_MQ7_DO)==LOW || v7 > baseMq7 + SENS_THRESH);
 
   bool quake = checkQuake();
@@ -252,7 +245,7 @@ void loop() {
       lcd.setCursor(0,1); lcd.print("XAVF ANIQLANDI! ");
     } else {
       // Normal holat
-      lcd.printf("L:%.1f G:%.1f C:%.1f", v6, v9, v7);
+      lcd.printf("L:%.1f C:%.1f     ", v6, v7);
       lcd.setCursor(0,1);
       lcd.printf("T:%.0fC W:%s", temp, WiFi.status()==WL_CONNECTED?"Ok":"..");
     }
@@ -262,7 +255,7 @@ void loop() {
   // Xavf paytida har 3 soniyada, tinch paytda har 60 soniyada
   unsigned long interval = alarm ? 3000 : 60000;
   if (millis() - lastSentTime > interval) {
-    sendData(alarm, fire, quake, v6, v9, v7, temp);
+    sendData(alarm, fire, quake, v6, v7, temp);
     lastSentTime = millis();
 
     // Debug
